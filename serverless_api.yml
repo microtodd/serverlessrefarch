@@ -1,0 +1,279 @@
+# Copyright (c) 2018, T.S. Davenport
+# serverless backend reference architecture
+#
+Description: "Serverless Backend"
+
+Metadata:
+    Product: "PRODUCTNAME"
+    Release: "Release1"
+    Copyright: "2018, T.S. Davenport"
+    Filename: "serverless_api.yml"
+
+# Parameters section
+Parameters:
+
+    # S3 Bucket name
+    pS3BucketLambdaCode:
+        Description: "Where is lambda code? s3-bucket-name/path/to/code.zip"
+        Type: "String"
+
+# Resources section
+Resources:
+
+    # Following need to be created manually:
+    #
+    # Domain name
+    # (https://docs.aws.amazon.com/apigateway/latest/developerguide/how-to-custom-domains.html)
+    #
+    # Route53: product.com
+    # SSL Certificate in ACM: *.product.com => (ARN/UUID)
+    # APIGateway Custom Domain Name: api.product.com (A) => <something>.cloudfront.net
+    #
+    APIGatewayDomainName:
+        Type: "AWS::ApiGateway::BasePathMapping"
+        Properties:
+            BasePath: "beta1"
+            DomainName: "api.product.com"
+            RestApiId: !Ref APIGatewayRestAPI
+            Stage: !Ref APIGatewayDeploymentStage
+    
+    ### API Gateway
+    #
+    # -API
+    # -Deployment (.com/<deployment>)
+    # -DeploymentStage (ties Deployment and Rest API together)
+    # -Authorizer
+    # https://<RestAPIId>.execute-api.us-east-1.amazonaws.com/<deploymentStage>/<resource>
+    #
+    
+    # core
+    APIGatewayRestAPI:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "ProductAPI"
+            FailOnWarnings: true
+
+    APIGatewayDeployment:
+        Type: "AWS::ApiGateway::Deployment"
+        Properties:
+            RestApiId: !Ref APIGatewayRestAPI
+        DependsOn:
+            - APIGatewayMethodTest
+ 
+    APIGatewayDeploymentStage:
+        Type: "AWS::ApiGateway::Stage"
+        Properties:
+            DeploymentId: !Ref APIGatewayDeployment
+            RestApiId: !Ref APIGatewayRestAPI
+            StageName: "release1"
+
+    APIGatewayAuthorizerBasicUser:
+        Type: "AWS::ApiGateway::Authorizer"
+        Properties:
+            AuthorizerUri: !Sub arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/${LambdaFunctionAuthorizerBasicUser.Arn}/invocations
+            IdentitySource: "method.request.header.x-ap-auth"
+            Name: "AuthorizerBasicUser"
+            RestApiId: !Ref APIGatewayRestAPI
+            Type: "REQUEST"
+
+    # Specific APIs
+    # -Resource (.com/<deployment>/<resource>)
+    # -Method (POST)
+    #
+    # Each API is tied to a lambda, farther down in the CFT
+    #
+    # NOTE: When you create a new API, make sure you tie it to the deployment
+    #       Go to APIGateway, find the Resource method, and do the Deploy API action
+    # 
+
+    # /test
+    APIGatewayResourceTest:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
+            PathPart: "test"
+            RestApiId: !Ref APIGatewayRestAPI
+    APIGatewayMethodTest:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            AuthorizationType: "NONE"
+            HttpMethod: "POST"
+            ResourceId: !Ref APIGatewayResourceTest
+            RestApiId: !Ref APIGatewayRestAPI
+            Integration:
+                Type: "AWS_PROXY"
+                IntegrationHttpMethod: "POST"
+                Uri: !Sub arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/${LambdaFunctionTest.Arn}/invocations
+
+    # /auth
+    APIGatewayResourceAuth:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
+            PathPart: "auth"
+            RestApiId: !Ref APIGatewayRestAPI
+    APIGatewayMethodAuth:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            AuthorizationType: "NONE"
+            HttpMethod: "POST"
+            ResourceId: !Ref APIGatewayResourceAuth
+            RestApiId: !Ref APIGatewayRestAPI
+            Integration:
+                Type: "AWS_PROXY"
+                IntegrationHttpMethod: "POST"
+                Uri: !Sub arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/${LambdaFunctionAuth.Arn}/invocations
+        
+    # /testwithauth
+    APIGatewayResourceTestwithauth:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
+            PathPart: "testwithauth"
+            RestApiId: !Ref APIGatewayRestAPI
+    APIGatewayMethodTestwithauth:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            AuthorizationType: "CUSTOM"
+            AuthorizerId: !Ref APIGatewayAuthorizerBasicUser
+            HttpMethod: "POST"
+            ResourceId: !Ref APIGatewayResourceTestwithauth
+            RestApiId: !Ref APIGatewayRestAPI
+            Integration:
+                Type: "AWS_PROXY"
+                IntegrationHttpMethod: "POST"
+                Uri: !Sub arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/${LambdaFunctionTestwithauth.Arn}/invocations
+
+    ### Lambda
+    #
+    # -ExecutionRole (most lambdas can use this one)
+    # -Function itself
+    # -LambdaPermission (Tells the lambda that the API can call it)
+    
+    # The role that the lambda runs as
+    LambdaExecutionRoleBasic:
+        Type: "AWS::IAM::Role"
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: "Allow"
+                      Principal:
+                        Service: "lambda.amazonaws.com"
+                      Action: "sts:AssumeRole"
+            Path: "/"
+            Policies:
+                - PolicyName: "root"
+                  PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                    
+                        # Allow lambda to work with cloudwatch logs
+                        - Effect: "Allow"
+                          Action:
+                            - "logs:*"
+                          Resource: "*"
+
+                        # Any other resources to get access to, for example dynamodb
+                        - Effect: "Allow"
+                          Action: "dynamodb:*"
+                          Resource: !Join [ "", [ "arn:aws:dynamodb:us-east-1:", !Ref "AWS::AccountId", ":table/tablename*" ] ]
+    
+    # Lambda functions
+
+    # /test
+    LambdaFunctionTest:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Handler: "index.handler"
+            Role: !GetAtt LambdaExecutionRoleBasic.Arn
+            Runtime: "python2.7"
+            Timeout: "60"
+            Code:
+                ZipFile: |
+                    import datetime
+                    def handler(event,context):
+                        print 'Event: ' + str(event)
+                        print 'Context: ' + str(context)
+                        myOut = {}
+                        myOut['statusCode'] = '200'
+                        myOut['body'] = 'test received: ' + str(datetime.datetime.now())
+                        return myOut
+    LambdaAPIGatewayPermissionTest:
+        Type: "AWS::Lambda::Permission"
+        Properties:
+            Action: "lambda:InvokeFunction"
+            FunctionName: !Ref LambdaFunctionTest
+            Principal: "apigateway.amazonaws.com"
+            SourceArn: !Join [ "", [ "arn:aws:execute-api:us-east-1:", !Ref "AWS::AccountId", ":*" ] ]
+
+    # /auth
+    LambdaFunctionAuth:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Handler: "auth.handler"
+            Role: !GetAtt LambdaExecutionRoleBasic.Arn
+            Runtime: "python2.7"
+            Timeout: "60"
+            Code:
+                S3Bucket: !Ref pS3BucketLambdaCode
+                S3Key: "lambda-api/lambda-auth.zip"
+            #Environment:
+            #    Variables:
+            #        variablename: value
+    LambdaAPIGatewayPermissionAuth:
+        Type: "AWS::Lambda::Permission"
+        Properties:
+            Action: "lambda:InvokeFunction"
+            FunctionName: !Ref LambdaFunctionAuth
+            Principal: "apigateway.amazonaws.com"
+            SourceArn: !Join [ "", [ "arn:aws:execute-api:us-east-1:", !Ref "AWS::AccountId", ":*" ] ]
+
+    # /testwithauth
+    LambdaFunctionTestwithauth:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Handler: "test.handler"
+            Role: !GetAtt LambdaExecutionRoleBasic.Arn
+            Runtime: "python2.7"
+            Timeout: "60"
+            Code:
+                S3Bucket: !Ref pS3BucketLambdaCode
+                S3Key: "lambda-api/lambda-testwithauth.zip"
+            #Environment:
+            #    Variables:
+            #        varname: varvalue
+    LambdaAPIGatewayPermissionTestwithauth:
+        Type: "AWS::Lambda::Permission"
+        Properties:
+            Action: "lambda:InvokeFunction"
+            FunctionName: !Ref LambdaFunctionTestwithauth
+            Principal: "apigateway.amazonaws.com"
+            SourceArn: !Join [ "", [ "arn:aws:execute-api:us-east-1:", !Ref "AWS::AccountId", ":*" ] ]
+
+    # Authorizer
+    LambdaFunctionAuthorizerBasicUser:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Handler: "authorizerbasicuser.handler"
+            Role: !GetAtt LambdaExecutionRoleBasic.Arn
+            Runtime: "python2.7"
+            Timeout: "60"
+            Code:
+                S3Bucket: !Ref pS3BucketLambdaCode
+                S3Key: "lambda-api/lambda-authorizerbasicuser.zip"
+            Environment:
+                Variables:
+                    maxTokenLifetime: !Ref pMaxTokenLifetime
+    LambdaAPIGatewayPermissionAuthorizerBasicUser:
+        Type: "AWS::Lambda::Permission"
+        Properties:
+            Action: "lambda:InvokeFunction"
+            FunctionName: !Ref LambdaFunctionAuthorizerBasicUser
+            Principal: "apigateway.amazonaws.com"
+            SourceArn: !Join [ "", [ "arn:aws:execute-api:us-east-1:", !Ref "AWS::AccountId", ":", !Ref "APIGatewayRestAPI", "/*" ] ]
+
+
+    
+
+
