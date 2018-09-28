@@ -59,7 +59,6 @@ def handler(event,context):
     # Return
     myPayload['status'] = 'success'
     myPayload['errorMessage'] = ''
-    myPayload['serviceList'] = allServices
     myOut['body'] = json.dumps(myPayload)
 
     # successful exit
